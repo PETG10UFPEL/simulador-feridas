@@ -76,36 +76,92 @@ def _build_wound_prompt(scenario: dict, visual_description: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Provedor 1 — Gemini Imagen 3
+# Provedor 1 — Gemini (dois sub-métodos internos; a função pública tenta em cascata)
 # ---------------------------------------------------------------------------
+
+def _gemini_imagen4(prompt: str, api_key: str) -> Optional[bytes]:
+    """
+    Imagen 4 via endpoint :predict  (modelo dedicado de geração de imagem).
+    Documentação: https://ai.google.dev/gemini-api/docs/imagen
+    """
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"imagen-4.0-generate-001:predict?key={api_key}"
+    )
+    payload = {
+        "instances": [{"prompt": prompt}],
+        "parameters": {"sampleCount": 1, "aspectRatio": "1:1"},
+    }
+    resp = requests.post(url, json=payload, timeout=90)
+    resp.raise_for_status()
+    predictions = resp.json().get("predictions") or []
+    if not predictions:
+        return None
+    b64 = predictions[0].get("bytesBase64Encoded") or predictions[0].get("b64_json")
+    return base64.b64decode(b64) if b64 else None
+
+
+def _gemini_native_image(prompt: str, api_key: str) -> Optional[bytes]:
+    """
+    Gemini 3.1 Flash Image Preview via generateContent (geração de imagem nativa).
+    Usa o campo inlineData da resposta multimodal.
+    Documentação: https://ai.google.dev/gemini-api/docs/image-generation
+    """
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-2.5-flash-image:generateContent?key={api_key}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["TEXT", "IMAGE"]},
+    }
+    resp = requests.post(url, json=payload, timeout=90)
+    resp.raise_for_status()
+    parts = (
+        resp.json()
+        .get("candidates", [{}])[0]
+        .get("content", {})
+        .get("parts", [])
+    )
+    for part in parts:
+        inline = part.get("inlineData") or part.get("inline_data")
+        if inline and inline.get("data"):
+            return base64.b64decode(inline["data"])
+    return None
+
+
 def generate_wound_image_gemini(
     scenario: dict,
     visual_description: str = "",
     api_key: Optional[str] = None,
 ) -> Optional[bytes]:
     """
-    Gera imagem via Google Gemini Imagen 3 (imagen-3.0-generate-001).
+    Gera imagem via Google Gemini.
+
+    Tenta em cascata:
+      1. Imagen 4  (imagen-4.0-generate-001, endpoint :predict)
+      2. Gemini 2.5 Flash Image  (gemini-2.5-flash-image, endpoint generateContent)
 
     Parâmetros
     ----------
     scenario : dict
         Dicionário do caso clínico (etiologia, tecido, exsudato, infeccao …)
     visual_description : str
-        Descrição visual textual gerada pelo Gemini (campo visual_description do GeminiCaseGenerator).
+        Descrição visual textual gerada pelo Gemini.
     api_key : str, opcional
         GEMINI_API_KEY. Se omitido, lê de os.environ["GEMINI_API_KEY"].
 
     Retorna
     -------
     bytes
-        PNG em bytes, ou None se o modelo não retornar imagem (ex.: bloqueio de conteúdo).
+        PNG em bytes, ou None se ambos os modelos falharem silenciosamente.
 
     Levanta
     -------
     ValueError
         Se a chave API não estiver configurada.
-    requests.HTTPError
-        Para erros HTTP da API.
+    Exception
+        Propaga o último erro se ambas as tentativas levantarem exceção.
     """
     api_key = (api_key or os.getenv("GEMINI_API_KEY", "")).strip()
     if not api_key:
@@ -115,32 +171,27 @@ def generate_wound_image_gemini(
         )
 
     prompt = _build_wound_prompt(scenario, visual_description)
+    last_exc: Optional[Exception] = None
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"imagen-3.0-generate-001:predict?key={api_key}"
-    )
-    payload = {
-        "instances": [{"prompt": prompt}],
-        "parameters": {
-            "sampleCount": 1,
-            "aspectRatio": "1:1",
-        },
-    }
+    # Tentativa 1: Imagen 4
+    try:
+        result = _gemini_imagen4(prompt, api_key)
+        if result:
+            return result
+    except Exception as exc:
+        last_exc = exc
 
-    resp = requests.post(url, json=payload, timeout=90)
-    resp.raise_for_status()
-    data = resp.json()
+    # Tentativa 2: Gemini 2.5 Flash Image (nativo)
+    try:
+        result = _gemini_native_image(prompt, api_key)
+        if result:
+            return result
+    except Exception as exc:
+        last_exc = exc
 
-    predictions = data.get("predictions") or []
-    if not predictions:
-        return None
-
-    b64 = predictions[0].get("bytesBase64Encoded") or predictions[0].get("b64_json")
-    if not b64:
-        return None
-
-    return base64.b64decode(b64)
+    if last_exc:
+        raise last_exc
+    return None
 
 
 # ---------------------------------------------------------------------------
