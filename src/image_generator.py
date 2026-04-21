@@ -69,7 +69,7 @@ def _build_wound_prompt(scenario: dict, visual_description: str = "") -> str:
         f"irregular wound margins, clinical diagram style, "
         f"labeled anatomical drawing on clean white background, "
         f"no patient identity visible, professional medical textbook illustration, "
-        f"educational use only, no graphic gore, diagram labels in English."
+        f"educational use only, no graphic gore, all labels and annotations in Portuguese (PT-BR)."
         f"{extra}"
     )
     return prompt.strip()
